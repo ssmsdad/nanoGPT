@@ -78,7 +78,6 @@ class Header(nn.Module):
         self.key = nn.Linear(n_embd, head_size, bias=False)
         self.query = nn.Linear(n_embd, head_size, bias=False)
         self.value = nn.Linear(n_embd, head_size, bias=False)
-        # 将下三角矩阵放进buffer中，避免每次forward都要创建
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size))) # 下三角矩阵
         self.dropout = nn.Dropout(dropout)
 
