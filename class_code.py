@@ -6,19 +6,21 @@ import torch
 import torch.nn as nn
 import torch.optim as optim 
 from torch.nn import functional as F
+from peft import get_peft_model, LoraConfig, TaskType, PeftModel
 
 batch_size = 64
 block_size = 256
 max_iters = 5000
 eval_interval = 500
 learning_rate = 3e-4
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 eval_iters = 200
 n_embd = 384
 n_head = 6
 n_layer = 6
 dropout = 0.2
-
+lora_max_iters = 2000  # 微调步数，可根据需要调整
+lora_learning_rate = 1e-4  # 微调学习率，可根据需要调整
 
 torch.manual_seed(1337)
 
@@ -174,9 +176,11 @@ class BigramLanguageModel(nn.Module):
             idx_next = torch.multinomial(probs, num_samples=1)      # (B,1)
             idx = torch.cat((idx, idx_next), dim=1)     # (B,T+1)
         return idx
-    
+
+# 模型训练
 model = BigramLanguageModel()
 model.to(device)
+model.train()  
 optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
 
 for iter in range(max_iters):
@@ -190,10 +194,54 @@ for iter in range(max_iters):
     loss.backward()
     optimizer.step()
 
-# generate some text
+torch.save(model.state_dict(), "base_model.pt")
+
+
+# 定义 LoRA 配置
+lora_config = LoraConfig(
+    task_type=TaskType.CAUSAL_LM,   # 因果语言建模
+    inference_mode=False,
+    r=8,                            # LoRA rank
+    lora_alpha=16,
+    lora_dropout=0.05,
+    target_modules=["key", "query", "value"]  # 只对注意力层应用LoRA
+)
+
+# 微调 LoRA
+model = BigramLanguageModel()
+model.load_state_dict(torch.load("base_model.pt"))  
+model = get_peft_model(model, lora_config)
+model.to(device)
+model.train()
+# 冻结除LoRA参数外的所有参数
+for name, param in model.named_parameters():
+    if "lora_" not in name:
+        param.requires_grad = False
+optimizer = optim.AdamW(model.parameters(), lr=lora_learning_rate)
+
+for iter in range(lora_max_iters):
+    if iter % eval_interval == 0:
+        losses = estimate_loss(model, 'train')
+        print(f"[LoRA finetune] step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+
+    X, Y = get_batch('train')
+    logits, loss = model(X, Y)
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+
+model.save_pretrained("lora_model")
+
+# 测试生成
+base_model = BigramLanguageModel()
+model = PeftModel.from_pretrained(base_model, "lora_model")
+model.to(device)
+model.eval()
 context = 'hello'
-context = torch.tensor(encode(context), dtype=torch.long, device=device)[None, :] # (1,T)
-print(decode(model.generate(context, max_new_tokens=500)[0].tolist()))
+context = torch.tensor(encode(context), dtype=torch.long, device=device)[None, :]
+result = decode(model.generate(context, max_new_tokens=1000)[0].tolist())
+with open("lora_generate.txt", "w", encoding="utf-8") as f:
+    f.write(result)
 
 
 
